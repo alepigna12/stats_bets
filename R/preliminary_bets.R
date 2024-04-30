@@ -1,5 +1,5 @@
 library(dplyr)
-data = read.csv("nba_betting_money_line.csv")
+data = read.csv(file.path(getwd(),"data/nba_betting_money_line.csv"))
 prob_data = data %>%
   na.omit() %>%
   mutate(prob1 = unlist(lapply(price1, function(x) implied_prob(create_odds_object(x)))),
@@ -12,7 +12,7 @@ stats <- prob_data %>%
             best_a = max(price2),
             alpha = sum(prob1_novig),
             beta = sum(prob2_novig))
-games = read.csv("nba_games_all.csv")
+games = read.csv(file.path(getwd(),"data/nba_games_all.csv"))
 results = games %>% select(game_id, wl) %>%
   na.omit() %>%
   mutate(w = wl=="W")
@@ -21,7 +21,7 @@ data = merge(stats, games%>%select(game_id, w), by="game_id") %>%
          best_a = unlist(lapply(best_a, function(x) create_odds_object(x)$european)))
 
 #for arbitrage: a*best_h = (1-a)*best_a  > 1
-# a(best_h+best_a) = best_a --> best_a/(best_h+best_a)
+# a(best_h+best_a) = best_a --> a = best_a/(best_h+best_a)
 
 data %>% mutate(pstar = best_a/(best_h+best_a),
                 estar = pstar * best_h - 1)%>%
