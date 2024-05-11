@@ -1,0 +1,714 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+```
+
+```{r}
+get_betting_frac <- function(p_s, odds) {
+  # p_s: probability for each option to be true
+  # odds: a vector of odds
+  is_subfair = ifelse(sum(1/odds)>1, TRUE, FALSE)
+  if (is_subfair) {
+    if (sum(p_s*odds > 1)) {
+      p_odds_prod = p_s * odds
+      p_odds_prod_order = order(p_odds_prod, decreasing=TRUE)
+      p_odds_prod_desc = sort(p_odds_prod, decreasing = TRUE)
+      Ck = c(1, (1-cumsum(p_s[p_odds_prod_order])) / (1 - cumsum(1/odds[p_odds_prod_order])))
+      t = which(p_odds_prod_desc <= Ck[1:length(Ck)-1])[1] - 1
+      Ct = Ck[t+1]
+      frac = p_s[p_odds_prod_order] - Ct/odds[p_odds_prod_order]
+      frac[(t+1):length(frac)] = 0
+      frac[p_odds_prod_order] = frac
+      frac = c(Ct, frac)
+    } else { # no betting
+      frac = c(1, rep(0, length(odds)))
+    }
+  } else { # fair or superfair odds
+    frac = c(0, p_s)
+  }
+  return(frac) # c(hold-up money, bets on each option)
+}
+
+adjust_betting_fraction <- function(betting_frac, 
+                                    initial_money,
+                                    betting_restriction) {
+  betting_amount = betting_frac * initial_money
+  for (i in 2:length(betting_amount)) {
+    if (betting_amount[i] > betting_restriction[2]) {
+      betting_amount[i] = betting_restriction[2]
+    }
+    if (betting_amount[i] < betting_restriction[1]) {
+      betting_amount[i] = 0
+    }
+    betting_amount[i] = betting_amount[i] - betting_amount[i] %% betting_restriction[3]
+  }
+  betting_amount[1] = 0
+  betting_amount[1] = initial_money - sum(betting_amount)
+  return(betting_amount) # return the amount to bet (not fraction)
+}
+```
+
+# Dataset 1
+
+```{r}
+is_arbitrage <- function(game_id, data_df) {
+  game_df = data_df[data_df$game_id==game_id, ]
+  # get odds
+  max_team_price = max(game_df$team_price)
+  max_other_price = max(game_df$other_price)
+  team_prob = implied_prob(create_odds_object(max_team_price, type="american odds"))
+  other_prob = implied_prob(create_odds_object(max_other_price, type="american odds"))
+  team_odds = 1 / team_prob
+  other_odds = 1 / other_prob
+  prob_total = team_prob + other_prob
+  team_prob = team_prob / prob_total
+  other_prob = other_prob / prob_total
+  # check for arbitrage (superfair odds)
+  if (1/team_odds + 1/other_odds < 1) {
+    return(TRUE)
+  }
+  return(FALSE)
+}
+
+bet_for_a_game <- function(game_id, data_df, method, strategy, frac_to_bet,
+                           initial_money=1, 
+                           betting_restriction=c(1, 10000, 0.05),
+                           expected_result = FALSE) {
+  # Suppose you have 1 unit of money
+  # Return the amount of money after betting
+  # method: chosen from c("mean_prob", "median_prob", "single_prob")
+  # strategy: c("optimal", "random betting", "most favorable", "least favorable")
+  #   random betting: bet 0.5 on one team and 0.5 on the other
+  #   most favorable: bet only on the most favorable choice
+  #   least favorable: bet only on the least favorable choice
+  # frac_to_bet: the fraction of money to bet for most-favorable 
+  #              and least-favorable stratigies
+  # initial_money: the amount of money we have
+  # betting_restriction: c(minimum to bet, maximum to bet, unit); NA if no restriction
+  # expected_result: whether to get the expected result
+  
+  game_df = data_df[data_df$game_id==game_id, ]
+  
+  # get odds
+  max_team_price = max(game_df$team_price)
+  max_other_price = max(game_df$other_price)
+  team_odds = 1 / implied_prob(create_odds_object(max_team_price, type="american odds"))
+  other_odds = 1 / implied_prob(create_odds_object(max_other_price, type="american odds"))
+  
+  # estimate the winning probability
+  if (method == "single_prob") {
+    # estimate probability from the odds
+    team_prob = implied_prob(create_odds_object(max_team_price, type="american odds"))
+    other_prob = implied_prob(create_odds_object(max_other_price, type="american odds"))
+  } else {
+    # get implied probabilities aggregated across books
+    team_prob = sapply(game_df$team_price, 
+                       function(x) 
+                         implied_prob(create_odds_object(x, type="american odds")))
+    other_prob = sapply(game_df$other_price, 
+                        function(x) 
+                          implied_prob(create_odds_object(x, type="american odds")))
+    normalization_const = team_prob + other_prob
+    team_prob = team_prob / normalization_const
+    other_prob = other_prob / normalization_const
+    if (method == "mean_prob") {
+      team_prob = mean(team_prob)
+      other_prob = mean(other_prob)
+    } else if (method == "median_prob") {
+      team_prob = median(team_prob)
+      other_prob = median(other_prob)
+    }
+  }
+  # normalize implied probabilities
+  prob_total = team_prob + other_prob
+  team_prob = team_prob / prob_total
+  other_prob = other_prob / prob_total
+  p_s = c(team_prob, other_prob)
+  
+  # get the betting fraction
+  if (strategy == "optimal") {
+    betting_frac = get_betting_frac(p_s, c(team_odds, other_odds))
+  } else if (strategy == "random betting") {
+    betting_frac = c(0, 0.5, 0.5)
+  } else if (strategy == "most favorable") {
+    betting_frac = c(1 - frac_to_bet, 0, 0)
+    if (team_odds > other_odds) { # bet on other
+      betting_frac[3] = frac_to_bet
+    } else { # bet on team
+      betting_frac[2] = frac_to_bet
+    }
+  } else if (strategy == "least favorable") {
+    betting_frac = c(1 - frac_to_bet, 0, 0)
+    if (team_odds > other_odds) { # bet on team
+      betting_frac[2] = frac_to_bet
+    } else { # bet on other
+      betting_frac[3] = frac_to_bet
+    }
+  }
+  if (any(is.na(betting_restriction))) {
+    betting_amount = initial_money * betting_frac
+  } else {
+    betting_amount = adjust_betting_fraction(betting_frac, 
+                                             initial_money,
+                                             betting_restriction)
+  }
+  
+  # get the result
+  # if (betting_frac[1] > 0 && betting_frac[1] < 1) {
+  #   print(game_id)
+  # }
+  if (expected_result) {
+    money = betting_amount[1] + 
+      betting_amount[2] * team_odds * p_s[1] +
+      betting_amount[3] * other_odds * p_s[2]
+  } else {
+    money = betting_amount[1]
+    if (game_df$wl[1] == "W") { # team wins
+      money = money + betting_amount[2] * team_odds
+    } else { # team loses
+      money = money + betting_amount[3] * other_odds
+    }
+  }
+  return(money)
+}
+```
+
+
+```{r}
+game_filepath = "nba_games_all.csv"
+bets_filepath = "nba_betting_money_line.csv"
+game_df = read.csv(game_filepath)[, c("game_id", "game_date", "team_id", "a_team_id", "wl", "is_home")]
+bets_df = read.csv(bets_filepath)[, c("game_id", "book_name", "book_id", "team_id", "a_team_id", "price1", "price2")]
+
+game_info = game_df %>% 
+  group_by(game_id, team_id, is_home, wl) %>% 
+  summarise(count=n(), .groups="drop") %>%
+  group_by(game_id) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(match_team_id = team_id) %>%
+  arrange(game_id) %>%
+  select(game_id, match_team_id, is_home, wl)
+
+data_df = bets_df %>%
+  inner_join(game_info, by = join_by(game_id)) %>% 
+  mutate(
+    team_price = case_when(
+      is_home == "t" ~ price2,
+      is_home == "f" ~ price1
+    ),
+    other_price = case_when(
+      is_home == "t" ~ price1,
+      is_home == "f" ~ price2
+    )
+  ) %>%
+  arrange(game_id)
+
+# data_df # all games (n = 14906 games)
+# remove arbitrage (n = 1398 games, n = 13508 games remain)
+game_id_vec = unique(data_df$game_id)
+arbitrage_status = sapply(game_id_vec, function(x) is_arbitrage(x, data_df))
+data_df_no_arbitrage = data_df[!data_df$game_id %in% game_id_vec[arbitrage_status], ]
+data_df_no_arbitrage # games with no arbitrage (with no superfair odds)
+```
+
+```{r}
+# check bets
+data_df %>%
+  mutate(price_diff = other_price - team_price) %>%
+  group_by(wl) %>%
+  summarize(median(team_price), median(other_price))
+
+data_df_no_arbitrage %>%
+  mutate(price_diff = other_price - team_price) %>%
+  group_by(wl) %>%
+  summarize(median(team_price), median(other_price))
+```
+
+First, consider the easy scenario of arbitrage.
+
+Use Kelly's strategy (strategy = "optimal"), with no betting restrictions.
+Empirically, the mean return of betting with one dollar is
+     25%      50%      75% (single prob, mean: 1.028571, final: 4.457478e+14)
+1.001835 1.005950 1.016063 
+
+6.371263e+12
+      25%       50%       75% 
+0.9913701 1.0033943 1.0235912 
+[1] 1.026983 - mean (median_prob)
+
+[1] 2.920471e+14
+      25%       50%       75% 
+0.9946558 1.0043205 1.0207849 
+[1] 1.030855 - mean (mean_prob)
+
+
+least favorable - 0.1
+
+The theoretical expectation is 
+
+[1] 4.457478e+14
+     25%      50%      75% 
+1.001835 1.005950 1.016063 
+[1] 1.028571 - single prob
+
+[1] 2.45111e+19
+     25%      50%      75% 
+1.002135 1.006602 1.016746 
+[1] 1.049047 - mean prob
+
+[1] 5.512082e+20
+     25%      50%      75% 
+1.002260 1.006627 1.016703 
+[1] 1.057374 - median prob
+
+The above shows that single prob is the most accurate one in estimating the implied probability because it has the least difference between the expectation and the empirical results.
+
+```{r}
+game_id_vec = unique(data_df$game_id)
+money_results = sapply(game_id_vec[arbitrage_status], 
+                       function(x) 
+                         bet_for_a_game(x,
+                                        data_df, 
+                                        method="single_prob",
+                                        strategy="least favorable",
+                                        frac_to_bet = 0.08,
+                                        initial_money = 1,
+                                        betting_restriction = NA,
+                                        expected_result = FALSE))
+money = exp(cumsum(log(money_results)))
+money[length(money)]
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+
+ggplot(data=data.frame(num=1:length(money), log_money=log(money))) +
+  geom_line(aes(x=num, y=log_money), linewidth = 1) +
+  labs(x = "Number of Games",
+       y = "log(money)",
+       title = "Kelly's betting with 1 dollar (empirical, median prob case)") +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 19, hjust = 0.5), 
+    axis.text.x = element_text(size = 16), 
+    axis.text.y = element_text(size = 16),   
+    axis.title.x = element_text(size = 16),          
+    axis.title.y = element_text(size = 16)              
+  )
+
+plot(hist(money_results), xlab="return", main="Least favorable betting (empirical)")
+```
+
+Now, add betting restrictions and use only the optimal strategy.
+
+[1] 976194
+      25%       50%       75% 
+0.9942854 1.0016535 1.0107414 
+[1] 1.009968 - single prob
+
+[1] 957753.8
+      25%       50%       75% 
+0.9913198 0.9991383 1.0109548 
+[1] 1.012265 - mean prob
+
+[1] 958503.1
+      25%       50%       75% 
+0.9913092 0.9991376 1.0121025 
+[1] 1.010224 - median prob
+
+Expected results
+
+[1] 650768.2
+     25%      50%      75% 
+1.000196 1.000793 1.004741 
+[1] 1.008466 - single prob
+
+[1] 1559826
+     25%      50%      75% 
+1.000183 1.000721 1.005719 
+[1] 1.009326 - mean prob
+
+[1] 1617053
+     25%      50%      75% 
+1.000189 1.000734 1.005797 
+[1] 1.0093 - median prob
+
+```{r}
+game_id_vec = unique(data_df$game_id)[arbitrage_status]
+curr_money = 10 # initial money
+prev_money = 10
+money_results = rep(NA, length(game_id_vec))
+money = rep(NA, length(game_id_vec))
+for (i in 1:length(game_id_vec)) {
+  game_id = game_id_vec[i]
+  curr_money = bet_for_a_game(game_id,
+                 data_df, 
+                 method="single_prob",
+                 strategy="least favorable",
+                 frac_to_bet = 0.3,
+                 initial_money = curr_money,
+                 betting_restriction = c(1, 10000, 0.05),
+                 expected_result = TRUE)
+  money[i] = curr_money
+  money_results[i] = curr_money / prev_money
+  prev_money = curr_money
+}
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+
+
+Betting only on games with fair odds and subfair odds. (the harder case)
+For optimal strategy, try with different method to estimate the implied probability: method = "single_prob", "median_prob", "mean_prob".
+
+Start with 1 dollar. No restrictions on the amount used to bet.
+
+[1] 1
+25% 50% 75% 
+  1   1   1 
+[1] 1 - single prob (didn't bet at all)
+
+[1] 0.2785226
+      25%       50%       75% 
+0.9967646 1.0000000 1.0000000 
+[1] 0.9999781 - mean prob
+
+[1] 0.1754585
+      25%       50%       75% 
+0.9964413 1.0000000 1.0000000 
+[1] 0.9999472 - median prob
+
+Expectation
+
+[1] 1
+25% 50% 75% 
+  1   1   1 
+[1] 1 - single prob
+
+[1] 9.380456
+     25%      50%      75% 
+1.000000 1.000000 1.000076 
+[1] 1.000166 - mean prob
+
+[1] 10.4179
+    25%     50%     75% 
+1.00000 1.00000 1.00008 
+[1] 1.000174 - median prob
+
+```{r}
+game_id_vec = unique(data_df_no_arbitrage$game_id)
+money_results = sapply(game_id_vec, 
+                       function(x) 
+                         bet_for_a_game(x,
+                                        data_df_no_arbitrage, 
+                                        method="single_prob",
+                                        strategy="least favorable",
+                                        frac_to_bet = 0.1,
+                                        initial_money = 1,
+                                        betting_restriction = NA,
+                                        expected_result = FALSE))
+money = exp(cumsum(log(money_results)))
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+```{r}
+game_id_vec = unique(data_df_no_arbitrage$game_id)
+curr_money = 10 # initial money
+prev_money = 10
+money_results = rep(NA, length(game_id_vec))
+money = rep(NA, length(game_id_vec))
+for (i in 1:length(game_id_vec)) {
+  game_id = game_id_vec[i]
+  curr_money = bet_for_a_game(game_id,
+                 data_df_no_arbitrage, 
+                 method="mean_prob",
+                 strategy="optimal",
+                 frac_to_bet = NA,
+                 initial_money = curr_money,
+                 betting_restriction = c(1, 10000, 0.05),
+                 expected_result = TRUE)
+  money[i] = curr_money
+  money_results[i] = curr_money / prev_money
+  prev_money = curr_money
+}
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+
+
+
+Arbitrages are removed.
+
+Compare with random betting (bet 0.5 on one team and 0.5 on the other)
+Bet only on the favorite (hold 0.5 money, bet 0.5 on the more favorable team)
+Bet only on the less favorite (hold 0.9 money, bet 0.1 on the less favorable team)
+Compare the empirical results with expected return (implied prob * odds) for all strategies above
+
+Strategy: unit: 5 cents; Amount to bet: [1, 10,000]
+ - conservative strategy: round down on the amount to bet; Don't bet if the total amount is fewer than 1 dollar. Start with 10 dollars.
+
+Different ways to aggregate across bookies to get the implied probability
+
+Bet on games with more than two choices
+
+
+# Dataset 2
+
+```{r}
+bet_for_a_game <- function(game_id, data_df, method, strategy,
+                           frac_to_bet,
+                           initial_money=1, 
+                           betting_restriction=c(1, 10000, 0.05),
+                           expected_result = FALSE) {
+  # Suppose you have 1 unit of money
+  # Return the amount of money after betting
+  # method: chosen from c("mean_prob", "single_prob")
+  # strategy: c("optimal")
+  # initial_money: the amount of money we have
+  # betting_restriction: c(minimum to bet, maximum to bet, unit); NA if no restriction
+  # expected_result: whether to get the expected result
+  
+  game_df = data_df[data_df$game_id==game_id, ]
+  
+  # get odds
+  win_odds = game_df$max_odds_home_win[1]
+  draw_odds = game_df$max_odds_draw[1]
+  lose_odds = game_df$max_odds_away_win[1]
+  
+  # estimate the winning probability
+  if (method == "single_prob") {
+    # estimate probability from the odds
+    win_prob = 1 / win_odds
+    draw_prob = 1 / draw_odds
+    lose_prob = 1 / lose_odds
+  } else if (method == "mean_prob") {
+    win_prob = 1 / game_df$avg_odds_home_win[1]
+    draw_prob = 1 / game_df$avg_odds_draw[1]
+    lose_prob = 1 / game_df$avg_odds_away_win[1]
+  }
+  # normalize implied probabilities
+  prob_total = win_prob + draw_prob + lose_prob
+  win_prob = win_prob / prob_total
+  draw_prob = draw_prob / prob_total
+  lose_prob = lose_prob / prob_total
+  p_s = c(win_prob, draw_prob, lose_prob)
+  
+  # get the betting fraction
+  if (strategy == "optimal") {
+    betting_frac = get_betting_frac(p_s, c(team_odds, other_odds))
+  } else if (strategy == "random betting") {
+    betting_frac = c(0, 1/3, 1/3, 1/3)
+  } else if (strategy == "most favorable") {
+    betting_frac = c(1 - frac_to_bet, 0, 0, 0)
+    if (win_odds > lose_odds) { # bet on lose
+      betting_frac[4] = frac_to_bet
+    } else { # bet on win
+      betting_frac[2] = frac_to_bet
+    }
+  } else if (strategy == "least favorable") {
+    betting_frac = c(1 - frac_to_bet, 0, 0, 0)
+    if (win_odds > lose_odds) { # bet on win
+      betting_frac[2] = frac_to_bet
+    } else { # bet on lose
+      betting_frac[4] = frac_to_bet
+    }
+  }
+  
+  # if (1/win_odds + 1/draw_odds + 1/lose_odds == 1) {
+  #   betting_frac = c(1, 0, 0, 0)
+  # }
+  
+  if (any(is.na(betting_restriction))) {
+    betting_amount = initial_money * betting_frac
+  } else {
+    betting_amount = adjust_betting_fraction(betting_frac, 
+                                             initial_money,
+                                             betting_restriction)
+  }
+  
+  # get the result
+  if (expected_result) {
+    money = betting_amount[1] + 
+      betting_amount[2] * win_odds * p_s[1] +
+      betting_amount[3] * draw_odds * p_s[2] +
+      betting_amount[4] * lose_odds * p_s[3]
+  } else {
+    money = betting_amount[1]
+    if (game_df$home_wl[1] == "win") { # team wins
+      money = money + betting_amount[2] * win_odds
+    } else if (game_df$home_wl[1] == "draw") {
+      money = money + betting_amount[3] * draw_odds
+    } else { # home team loses
+      money = money + betting_amount[4] * lose_odds
+    }
+  }
+  return(money)
+}
+```
+
+```{r}
+df <- read_excel("closing_odds.xlsx")[, c("match_id", 
+                                          "home_team", 
+                                          "home_score", "away_team", "away_score",
+       "avg_odds_home_win", "avg_odds_draw", "avg_odds_away_win",
+       "max_odds_home_win", "max_odds_draw", "max_odds_away_win")]
+data_df = df %>%
+  mutate(home_wl = case_when(
+    home_score == away_score ~ "draw",
+    home_score > away_score ~ "win",
+    home_score < away_score ~ "loss"
+  ),
+  game_id = match_id,
+  arbitrage_status = (1/max_odds_home_win + 1/max_odds_draw + 1/max_odds_away_win) < 1,
+  fair_status = (1/max_odds_home_win + 1/max_odds_draw + 1/max_odds_away_win) == 1) %>%
+  filter(avg_odds_home_win != 0, 
+         avg_odds_away_win != 0,
+         avg_odds_draw != 0) %>%
+  select(game_id, home_wl, arbitrage_status, fair_status,
+         avg_odds_home_win, avg_odds_draw, avg_odds_away_win,
+         max_odds_home_win, max_odds_draw, max_odds_away_win)
+# # data_df # all games (n = 479440 games)
+# # remove arbitrage (n = 70509 games, n = 408931 games remain)
+# data_df_no_arbitrage = data_df[!data_df$arbitrage_status, ]
+# data_df_no_arbitrage # games with no arbitrage (with no superfair odds)
+set.seed(1)
+random_rows = sample.int(nrow(data_df), 10000, replace=FALSE)
+data_df = data_df[random_rows,] # 10000
+data_df_no_arbitrage = data_df[!data_df$arbitrage_status, ] # 8559
+```
+
+```{r}
+# check bets
+data_df %>%
+  group_by(home_wl) %>%
+  summarize(median(max_odds_home_win), median(max_odds_draw), median(max_odds_away_win))
+
+data_df_no_arbitrage %>%
+  group_by(home_wl) %>%
+  summarize(median(max_odds_home_win), median(max_odds_draw), median(max_odds_away_win))
+
+```
+
+[1] 4.563418e+15
+     25%      50%      75% 
+1.005085 1.012048 1.025493 
+[1] 1.027012 - single prob
+
+
+[1] 3.046808e+12
+      25%       50%       75% 
+0.9794298 1.0063309 1.0465954 
+[1] 1.022213 - mean prob
+
+```{r}
+game_id_vec = unique(data_df[data_df$arbitrage_status,]$game_id)
+money_results = sapply(game_id_vec, 
+                       function(x) 
+                         bet_for_a_game(x,
+                                        data_df, 
+                                        method="single_prob",
+                                        strategy="optimal",
+                                        frac_to_bet = 0.5, 
+                                        initial_money = 1,
+                                        betting_restriction = NA,
+                                        expected_result = FALSE))
+money = exp(cumsum(log(money_results)))
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+
+
+[1] 513572.7
+      25%       50%       75% 
+0.9967008 0.9967008 0.9967008 
+[1] 0.9967008 - single prob
+
+[1] 361490.9
+      25%       50%       75% 
+0.9953193 0.9953193 0.9953193 
+[1] 0.9953193 - mean prob
+
+```{r}
+game_id_vec = unique(data_df[data_df$arbitrage_status,]$game_id)
+curr_money = 10 # initial money
+prev_money = 10
+money_results = rep(NA, length(game_id_vec))
+money = rep(NA, length(game_id_vec))
+for (i in 1:length(game_id_vec)) {
+  game_id = game_id_vec[i]
+  curr_money = bet_for_a_game(game_id,
+                 data_df, 
+                 method="single_prob",
+                 strategy="least favorable",
+                 frac_to_bet = 0.3, 
+                 initial_money = curr_money,
+                 betting_restriction = c(1, 10000, 0.05),
+                 expected_result = FALSE)
+  money[i] = curr_money
+  money_results[i] = money[i] / prev_money
+  prev_money = curr_money
+}
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+
+```{r}
+game_id_vec = unique(data_df[!data_df$arbitrage_status,]$game_id)
+money_results = sapply(game_id_vec, 
+                       function(x) 
+                         bet_for_a_game(x,
+                                        data_df, 
+                                        method="single_prob",
+                                        strategy="optimal",
+                                        frac_to_bet = NA, 
+                                        initial_money = 1,
+                                        betting_restriction = NA,
+                                        expected_result = FALSE))
+money = exp(cumsum(log(money_results)))
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
+
+
+```{r}
+game_id_vec = unique(data_df[!data_df$arbitrage_status,]$game_id)
+curr_money = 10 # initial money
+prev_money = 10
+money_results = rep(NA, length(game_id_vec))
+money = rep(NA, length(game_id_vec))
+for (i in 1:length(game_id_vec)) {
+  game_id = game_id_vec[i]
+  curr_money = bet_for_a_game(game_id,
+                 data_df, 
+                 method="mean_prob",
+                 strategy="optimal",
+                 frac_to_bet = 0.5, 
+                 initial_money = curr_money,
+                 betting_restriction = c(1, 10000, 0.05),
+                 expected_result = FALSE)
+  money[i] = curr_money
+  money_results[i] = money[i] / prev_money
+  prev_money = curr_money
+}
+money[length(money)]
+plot(1:length(money), log(money))
+quantile(money_results, c(0.25, 0.5, 0.75))
+mean(money_results)
+```
