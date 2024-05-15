@@ -3,7 +3,7 @@ title: "R Notebook"
 output: html_notebook
 ---
 
-```{r, warning=FALSE}
+```{r, warning=FALSE, message=FALSE, results='hide'}
 library(tidyverse)
 library(readxl)
 library(ggplot2)
@@ -179,6 +179,7 @@ bet_for_a_game <- function(game_id, data_df, method, strategy, frac_to_bet,
 }
 ```
 
+Load data and preprocessing
 
 ```{r}
 game_filepath = "nba_games_all.csv"
@@ -233,43 +234,6 @@ data_df_no_arbitrage %>%
 
 First, consider the easy scenario of arbitrage.
 
-Use Kelly's strategy (strategy = "optimal"), with no betting restrictions.
-Empirically, the mean return of betting with one dollar is
-     25%      50%      75% (single prob, mean: 1.028571, final: 4.457478e+14)
-1.001835 1.005950 1.016063 
-
-6.371263e+12
-      25%       50%       75% 
-0.9913701 1.0033943 1.0235912 
-[1] 1.026983 - mean (median_prob)
-
-[1] 2.920471e+14
-      25%       50%       75% 
-0.9946558 1.0043205 1.0207849 
-[1] 1.030855 - mean (mean_prob)
-
-
-least favorable - 0.1
-
-The theoretical expectation is 
-
-[1] 4.457478e+14
-     25%      50%      75% 
-1.001835 1.005950 1.016063 
-[1] 1.028571 - single prob
-
-[1] 2.45111e+19
-     25%      50%      75% 
-1.002135 1.006602 1.016746 
-[1] 1.049047 - mean prob
-
-[1] 5.512082e+20
-     25%      50%      75% 
-1.002260 1.006627 1.016703 
-[1] 1.057374 - median prob
-
-The above shows that single prob is the most accurate one in estimating the implied probability because it has the least difference between the expectation and the empirical results.
-
 ```{r}
 game_id_vec = unique(data_df$game_id)
 money_results = sapply(game_id_vec[arbitrage_status], 
@@ -304,39 +268,7 @@ ggplot(data=data.frame(num=1:length(money), log_money=log(money))) +
 plot(hist(money_results), xlab="return", main="Least favorable betting (empirical)")
 ```
 
-Now, add betting restrictions and use only the optimal strategy.
-
-[1] 976194
-      25%       50%       75% 
-0.9942854 1.0016535 1.0107414 
-[1] 1.009968 - single prob
-
-[1] 957753.8
-      25%       50%       75% 
-0.9913198 0.9991383 1.0109548 
-[1] 1.012265 - mean prob
-
-[1] 958503.1
-      25%       50%       75% 
-0.9913092 0.9991376 1.0121025 
-[1] 1.010224 - median prob
-
-Expected results
-
-[1] 650768.2
-     25%      50%      75% 
-1.000196 1.000793 1.004741 
-[1] 1.008466 - single prob
-
-[1] 1559826
-     25%      50%      75% 
-1.000183 1.000721 1.005719 
-[1] 1.009326 - mean prob
-
-[1] 1617053
-     25%      50%      75% 
-1.000189 1.000734 1.005797 
-[1] 1.0093 - median prob
+Now, add betting restrictions.
 
 ```{r}
 game_id_vec = unique(data_df$game_id)[arbitrage_status]
@@ -366,41 +298,6 @@ mean(money_results)
 
 
 Betting only on games with fair odds and subfair odds. (the harder case)
-For optimal strategy, try with different method to estimate the implied probability: method = "single_prob", "median_prob", "mean_prob".
-
-Start with 1 dollar. No restrictions on the amount used to bet.
-
-[1] 1
-25% 50% 75% 
-  1   1   1 
-[1] 1 - single prob (didn't bet at all)
-
-[1] 0.2785226
-      25%       50%       75% 
-0.9967646 1.0000000 1.0000000 
-[1] 0.9999781 - mean prob
-
-[1] 0.1754585
-      25%       50%       75% 
-0.9964413 1.0000000 1.0000000 
-[1] 0.9999472 - median prob
-
-Expectation
-
-[1] 1
-25% 50% 75% 
-  1   1   1 
-[1] 1 - single prob
-
-[1] 9.380456
-     25%      50%      75% 
-1.000000 1.000000 1.000076 
-[1] 1.000166 - mean prob
-
-[1] 10.4179
-    25%     50%     75% 
-1.00000 1.00000 1.00008 
-[1] 1.000174 - median prob
 
 ```{r}
 game_id_vec = unique(data_df_no_arbitrage$game_id)
@@ -446,21 +343,6 @@ quantile(money_results, c(0.25, 0.5, 0.75))
 mean(money_results)
 ```
 
-
-
-Arbitrages are removed.
-
-Compare with random betting (bet 0.5 on one team and 0.5 on the other)
-Bet only on the favorite (hold 0.5 money, bet 0.5 on the more favorable team)
-Bet only on the less favorite (hold 0.9 money, bet 0.1 on the less favorable team)
-Compare the empirical results with expected return (implied prob * odds) for all strategies above
-
-Strategy: unit: 5 cents; Amount to bet: [1, 10,000]
- - conservative strategy: round down on the amount to bet; Don't bet if the total amount is fewer than 1 dollar. Start with 10 dollars.
-
-Different ways to aggregate across bookies to get the implied probability
-
-Bet on games with more than two choices
 
 
 # Dataset 2
@@ -557,6 +439,8 @@ bet_for_a_game <- function(game_id, data_df, method, strategy,
 }
 ```
 
+Load data and preprocessing
+
 ```{r}
 df <- read_excel("closing_odds.xlsx")[, c("match_id", 
                                           "home_team", 
@@ -600,16 +484,7 @@ data_df_no_arbitrage %>%
 
 ```
 
-[1] 4.563418e+15
-     25%      50%      75% 
-1.005085 1.012048 1.025493 
-[1] 1.027012 - single prob
-
-
-[1] 3.046808e+12
-      25%       50%       75% 
-0.9794298 1.0063309 1.0465954 
-[1] 1.022213 - mean prob
+First, consider the easy scenario of arbitrage.
 
 ```{r}
 game_id_vec = unique(data_df[data_df$arbitrage_status,]$game_id)
@@ -630,16 +505,7 @@ quantile(money_results, c(0.25, 0.5, 0.75))
 mean(money_results)
 ```
 
-
-[1] 513572.7
-      25%       50%       75% 
-0.9967008 0.9967008 0.9967008 
-[1] 0.9967008 - single prob
-
-[1] 361490.9
-      25%       50%       75% 
-0.9953193 0.9953193 0.9953193 
-[1] 0.9953193 - mean prob
+Now, add betting restrictions.
 
 ```{r}
 game_id_vec = unique(data_df[data_df$arbitrage_status,]$game_id)
@@ -667,6 +533,8 @@ quantile(money_results, c(0.25, 0.5, 0.75))
 mean(money_results)
 ```
 
+Betting only on games with fair odds and subfair odds. (the harder case)
+
 ```{r}
 game_id_vec = unique(data_df[!data_df$arbitrage_status,]$game_id)
 money_results = sapply(game_id_vec, 
@@ -686,6 +554,7 @@ quantile(money_results, c(0.25, 0.5, 0.75))
 mean(money_results)
 ```
 
+Betting only on games with fair odds and subfair odds. (the harder case, also with practical restrictions)
 
 ```{r}
 game_id_vec = unique(data_df[!data_df$arbitrage_status,]$game_id)
