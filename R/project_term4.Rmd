@@ -133,7 +133,7 @@ bet_for_a_game <- function(game_id, data_df, method, strategy, frac_to_bet,
   
   # get the betting fraction
   if (strategy == "optimal") {
-    betting_frac = get_betting_frac(p_s, c(team_odds, other_odds))
+    betting_frac = get_betting_frac(p_s, c(win_odds, draw_odds, lose_odds))
   } else if (strategy == "random betting") {
     betting_frac = c(0, 0.5, 0.5)
   } else if (strategy == "most favorable") {
